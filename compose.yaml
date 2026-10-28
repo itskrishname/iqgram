@@ -1,0 +1,12 @@
+services:
+  iqgram:
+    build: .
+    container_name: iqgram
+    restart: unless-stopped
+    volumes:
+      - iqgram_data:/app/data
+      - ./config.py:/app/config.py:ro
+    command: ["python", "miko.py", "bot"]
+
+volumes:
+  iqgram_data:
