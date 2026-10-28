@@ -4,7 +4,7 @@ from .transfer import (
     UploadedHandle,
 )
 
-__version__ = '0.2.0'
+__version__ = '0.3.1'
 
 # Importing IQGram core does not require Telegram dependencies installed.
 # The live MTProto adapter is loaded when a Client is instantiated.
