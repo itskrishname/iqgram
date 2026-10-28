@@ -106,3 +106,43 @@ def test_download_refuses_overwrite():
                 await TransferEngine(FakeBackend(b'A'*10)).download('media',10,p)
             assert p.read_bytes()==b'existing'
     asyncio.run(run())
+
+
+def test_megabyte_download_requests_preserve_final_partial_chunk():
+    """Changing RPC request size must not corrupt or truncate the file."""
+    mib = 1024 * 1024
+    source = bytes(range(256)) * ((mib * 2) // 256) + b'end-of-file!'
+
+    async def run():
+        backend = FakeBackend(source)
+        engine = TransferEngine(
+            backend,
+            TransferOptions(download_workers=4, upload_workers=4, download_request_size=mib),
+        )
+        with TemporaryDirectory() as td:
+            out = Path(td) / 'megabyte.bin'
+            result = await engine.download('x', len(source), out)
+            assert out.read_bytes() == source
+            assert result.bytes_transferred == len(source)
+        assert backend.download_ranges
+        assert all(chunk_size == mib for _, _, chunk_size in backend.download_ranges)
+        assert sum(count for _, count, _ in backend.download_ranges) == 3
+    asyncio.run(run())
+
+
+def test_download_request_size_rejects_bad_values_and_keeps_default():
+    assert TransferOptions().download_request_size == 512 * 1024
+    for value in (0, 1024, 768 * 1024, 2 * 1024 * 1024, True):
+        with pytest.raises(ValueError, match='download_request_size'):
+            TransferOptions(download_request_size=value)
+
+
+def test_megabyte_download_backend_error_cleans_up_partial_file():
+    async def run():
+        backend = FakeBackend(b'')
+        engine = TransferEngine(backend, TransferOptions(download_request_size=1048576))
+        with TemporaryDirectory() as td:
+            with pytest.raises(TransferError):
+                await engine.download('x', 1048576, Path(td) / 'out')
+            assert list(Path(td).iterdir()) == []
+    asyncio.run(run())
