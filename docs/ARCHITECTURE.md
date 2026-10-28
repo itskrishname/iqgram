@@ -11,7 +11,9 @@ Developer app (bot OR user)
 
 ## Scheduling
 
-Download divides aligned 512-KiB ranges across independent coroutine workers. Each worker opens one Telethon iter_download request iterator at a different offset; results are written by pwrite to the corresponding file offset with full-length validation. Final files are published only after every chunk succeeds, so a failed download cannot appear complete. The scheduled coroutines do not yet correspond 1:1 to dedicated MTProto TCP sessions.
+A single `TransferEngine` instance has a configurable `asyncio.Semaphore` shared by its simultaneous downloads/uploads; default capacity is four, selected as `max(download_workers, upload_workers)`. Four is **not a hard cap**. Separate clients have independent budgets. Workers are logical scheduler lanes, not necessarily dedicated network connections.
+
+Download divides aligned 512-KiB or 1-MiB ranges (selectable; 512 KiB default) across independent coroutine workers. Each worker opens one Telethon iter_download request iterator at a different offset; results are written by pwrite to the corresponding file offset with full-length validation. Final files are published only after every chunk succeeds, so a failed download cannot appear complete. The scheduled coroutines do not yet correspond 1:1 to dedicated MTProto TCP sessions.
 
 Upload divides a file into 512-KiB parts, asynchronously dispatches saveFilePart (<=10 MiB) or saveBigFilePart (>10 MiB) to a bounded set of workers, and calls send_file with the resulting InputFile only after all parts are acknowledged. Small files get the required MD5 checksum. A retry of an entire upload may cause duplicate messages; the library does not run automatic upload retries.
 
