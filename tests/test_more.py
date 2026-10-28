@@ -26,7 +26,7 @@ def test_big_upload_uses_big_parts_and_no_checksum():
         backend=Backend()
         with TemporaryDirectory() as d:
             p=Path(d)/'big.bin';p.write_bytes(b'Z'*(10*1024*1024+17))
-            result=await TransferEngine(backend,TransferOptions(upload_workers=8)).upload(p,'me')
+            result=await TransferEngine(backend,TransferOptions(upload_workers=4)).upload(p,'me')
             assert result.bytes_transferred==10*1024*1024+17
             assert backend.handle.big is True
             assert backend.handle.md5_checksum is None
