@@ -4,7 +4,7 @@
 
 This repository contains a custom parallel download range scheduler, concurrent upload-part scheduler, a pluggable transport adapter, and a developer API for Telegram bot **and** user sessions. **It is not currently proven faster than WZGram**, and does not claim a 50x speedup. It uses **Telethon 1.45+ as the underlying authentication / MTProto RPC transport** while IQGram controls its file-part scheduling. It does **not** depend on WZGram.
 
-> **Project status: experimental alpha 0.2.0.** Local unit tests pass; Telegram production integration and real-world 50x benchmarks have not been completed here. Do not ship high-value production data without independent Telegram testing.
+> **Project status: experimental alpha 0.3.1.** Local unit tests pass; Telegram production integration and real-world 50x benchmarks have not been completed here. Do not ship high-value production data without independent Telegram testing.
 
 ## What belongs in the library?
 
@@ -44,7 +44,7 @@ async def main():
     async with Client(
         'my_user_session', api_id=123456,
         api_hash='YOUR_API_HASH',
-        options=TransferOptions(download_workers=4, upload_workers=4),
+        options=TransferOptions(download_workers=4, upload_workers=4, download_request_size=524288),
     ) as client:
         result = await client.download('me', 100, 'video.mkv')
         print(f'Download: {result.bytes_per_second / 1048576:.2f} MiB/s')
@@ -78,10 +78,60 @@ Only use media you are authorized to access. The code checks chunk lengths, avoi
 ## Settings
 
 ```python
-TransferOptions(download_workers=4, upload_workers=4)
+TransferOptions(download_workers=4, upload_workers=4, download_request_size=524288)
 ```
 
-Workers are **concurrent scheduler tasks**, not guaranteed unique TCP connections. Telethon handles connections; these worker settings cannot guarantee better throughput. Valid range: 1–32. Telegram upload parts are 512 KiB, and downloads use 512 KiB aligned request chunks.
+Workers are **concurrent scheduler tasks**, not guaranteed unique TCP connections. Every `Client` defaults to **4 active transfer slots total** shared between simultaneous downloads and uploads. The shared concurrency is derived from `max(download_workers, upload_workers)` rather than being hard-coded to 4. Valid worker values are 1–32, but there is **no special four-worker ceiling**. Increasing workers was slower on the owner's single 8-worker experiment; **the recommended and measured setup remains exactly 4 download and 4 upload workers**. These two figures refer to separate operations, not eight simultaneous TCP connections. Telethon manages its network connections.
+
+Telegram upload part size is fixed at 512 KiB. Download request size is 512 KiB by default, with an **optional experimental 1 MiB** mode. This changes the payload size requested per download RPC, **not** the number of workers or upload part size. No speedup has been verified for this mode yet.
+
+## Four-worker speed tuning (v0.3.1)
+
+- **Default:** four workers for download and four for upload; the default per-client shared backend-call budget is four.
+- **No 4-worker hard cap:** other values are accepted for developers, but four is the performance optimization target.
+- **A/B testing:** compare 512 KiB and 1024 KiB download RPC requests while keeping **four workers** in both cases. This helps identify whether RPC size is a limiting factor.
+- **Telegram socket note:** four scheduler tasks do **not** imply four dedicated MTProto media-only TCP connections. Building an independent media session pool remains future engineering work.
+- **Security:** `IQGRAM_API_ID` and `IQGRAM_API_HASH` are read by the *example benchmark only*. The library accepts credentials in `Client(...)` and has no `config.py`.
+
+### Upgrade in place (VPS)
+
+Download the ZIP and upload it to your VPS home directory, then run:
+
+```bash
+cd ~/IQGram
+unzip -o ~/IQGram-Four-Worker-Tuning-v0.3.1.zip -d ~/IQGram
+source .venv/bin/activate
+python -m pip install -e '.[fast,dev]'
+python -m pytest -q
+```
+
+The archive has files directly at the project root (no `IQGram-main/` nested folder). Your `.venv` and session files stay untouched. Do not commit `.session` files or exported credentials. This ZIP is a **source update**, not a GitHub push.
+
+### Test the same file with four workers (two download RPC sizes)
+
+**Known baseline, 512 KiB download requests:**
+
+```bash
+python examples/benchmark.py \
+  --session "$HOME/.iqgram_sessions/benchmark" \
+  --chat me --message 7552 --upload-chat me \
+  --download-workers 4 --upload-workers 4 \
+  --download-request-kib 512
+```
+
+**Experimental 1 MiB download requests, still four workers:**
+
+```bash
+python examples/benchmark.py \
+  --session "$HOME/.iqgram_sessions/benchmark" \
+  --chat me --message 7552 --upload-chat me \
+  --download-workers 4 --upload-workers 4 \
+  --download-request-kib 1024
+```
+
+Only download request size changes between the two commands. Upload uses the same 512 KiB parts and four upload workers in both cases, so don't expect an upload speedup from this setting. Repeat each mode under comparable VPS/network load, compare medians, and stop on any Telegram rate-limit error.
+
+Your VPS may need `IQGRAM_API_ID` and `IQGRAM_API_HASH` exported again after SSH reconnect; the sample does not save them. The benchmark creates a new message in Saved Messages when `--upload-chat me` is supplied.
 
 ## Roadmap (not included yet)
 
