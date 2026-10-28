@@ -26,12 +26,15 @@ class TransferError(RuntimeError):
 class TransferOptions:
     download_workers: int = 4
     upload_workers: int = 4
+    download_request_size: int = CHUNK_SIZE
 
     def __post_init__(self) -> None:
-        if not (1 <= self.download_workers <= 32):
+        if type(self.download_workers) is not int or not 1 <= self.download_workers <= 32:
             raise ValueError('download_workers must be between 1 and 32')
-        if not (1 <= self.upload_workers <= 32):
+        if type(self.upload_workers) is not int or not 1 <= self.upload_workers <= 32:
             raise ValueError('upload_workers must be between 1 and 32')
+        if type(self.download_request_size) is not int or self.download_request_size not in (CHUNK_SIZE, 2 * CHUNK_SIZE):
+            raise ValueError('download_request_size must be 524288 or 1048576 bytes')
 
 @dataclass(frozen=True)
 class Progress:
@@ -128,6 +131,9 @@ class TransferEngine:
     def __init__(self, backend: TransferBackend, options: TransferOptions | None = None):
         self.backend = backend
         self.options = options or TransferOptions()
+        # Shared budget per engine/client, including opposite-direction jobs.
+        # Four lanes by default, not an unchangeable global hard cap.
+        self._slots = asyncio.Semaphore(max(self.options.download_workers, self.options.upload_workers))
 
     async def download(
         self,
@@ -144,7 +150,8 @@ class TransferEngine:
             raise FileExistsError(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + '.iqgram-' + secrets.token_hex(6) + '.part')
-        total_chunks = math.ceil(size / CHUNK_SIZE)
+        chunk_size = self.options.download_request_size
+        total_chunks = math.ceil(size / chunk_size)
         workers = min(self.options.download_workers, total_chunks)
         meter = _ProgressMeter(size, 'download', progress)
         fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
@@ -153,16 +160,17 @@ class TransferEngine:
 
             async def worker(begin: int, count: int) -> None:
                 received = 0
-                async for data in self.backend.iter_range(media, begin * CHUNK_SIZE, count, CHUNK_SIZE):
-                    if received >= count:
-                        raise TransferError('backend returned extra download chunks')
-                    offset = (begin + received) * CHUNK_SIZE
-                    expected = min(CHUNK_SIZE, size - offset)
-                    if len(data) != expected:
-                        raise TransferError(f'bad chunk at {offset}: got {len(data)} bytes, expected {expected}')
-                    await asyncio.to_thread(_pwrite_fully, fd, data, offset)
-                    await meter.add(len(data))
-                    received += 1
+                async with self._slots:
+                    async for data in self.backend.iter_range(media, begin * chunk_size, count, chunk_size):
+                        if received >= count:
+                            raise TransferError('backend returned extra download chunks')
+                        offset = (begin + received) * chunk_size
+                        expected = min(chunk_size, size - offset)
+                        if len(data) != expected:
+                            raise TransferError(f'bad chunk at {offset}: got {len(data)} bytes, expected {expected}')
+                        await asyncio.to_thread(_pwrite_fully, fd, data, offset)
+                        await meter.add(len(data))
+                        received += 1
                 if received != count:
                     raise TransferError(f'incomplete download range: {received}/{count} chunks')
 
@@ -226,7 +234,8 @@ class TransferEngine:
                         chunk = await asyncio.to_thread(os.pread, fd, expected, i*CHUNK_SIZE)
                         if len(chunk) != expected:
                             raise TransferError('file changed or truncated during upload')
-                        acknowledged = await self.backend.save_part(file_id, i, parts, chunk, is_big)
+                        async with self._slots:
+                            acknowledged = await self.backend.save_part(file_id, i, parts, chunk, is_big)
                         if not acknowledged:
                             raise TransferError(f'Telegram rejected file part {i}')
                         await meter.add(len(chunk))
