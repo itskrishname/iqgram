@@ -1,4 +1,23 @@
+# 0.5.0 — media types, profiling and optional WarpCrypto (2026-11-07)
+
+- Added explicit native upload modes (`document`, `auto`, `photo`, `video`, `audio`, `voice`, `video_note`, `animation`, `sticker`) while preserving document as the backwards-compatible default. Arbitrary file extensions remain supported as generic documents.
+- Added Telethon fallback for photo/document download with unknown size and atomic no-overwrite output.
+- Removed avoidable copies of Telethon memoryview download chunks; added per-worker iterator-wait and disk-write profiler and `--profile-download` benchmark option; no fabricated RTT or throughput claims.
+- Added `Client.reuse_media` to send unprotected Telegram-hosted media without redundant VPS transfer.
+- Added optional process-global WarpCrypto AES-IGE backend (`--crypto warpcrypto`) with ciphertext compatibility selftests; default remains Cryptg. **Not independently live-tested on VPS**.
+- Kept four workers as the default and experimental upload pipeline depth configurable; no 4-worker hard cap.
+- No guarantee or claim of 50x faster real Telegram file transfers.
+
 # Changelog
+
+## 0.4.0 — 2026-10-28
+
+- Added optional bounded upload part RPC pipelining **within** the default four worker loops (`upload_pipeline_depth=1..4`, default 1).
+- Each part counts toward upload progress only after server ACK; errors and cancellation drain outstanding tasks and do not publish incomplete media.
+- Preserved the stable depth=1 path and shared logical worker budget across simultaneous jobs.
+- Added `--upload-pipeline-depth` to standalone benchmarking CLI.
+- 4-worker 50x goal remains **unverified**; do not confuse aggregate file/bot rates or per-part averages with single-file throughput.
+
 
 ## 0.3.1 — 2026-10-28
 
