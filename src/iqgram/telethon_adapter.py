@@ -21,7 +21,9 @@ class TelethonBackend:
         )
         try:
             async for data in stream:
-                yield bytes(data)
+                # Telethon sometimes yields memoryview; pwrite accepts buffer
+                # objects, so don't create an unnecessary 512KiB/1MiB copy.
+                yield data if isinstance(data, (bytes, memoryview)) else bytes(data)
         finally:
             # Telethon iterator supports close(). The best-effort cleanup
             # helps release borrowed DC senders after cancellation/failure.
@@ -43,4 +45,13 @@ class TelethonBackend:
             raw = InputFileBig(handle.file_id, handle.parts, handle.name)
         else:
             raw = InputFile(handle.file_id, handle.parts, handle.name, handle.md5_checksum)
-        return await self.telegram.send_file(chat, raw, caption=caption, force_document=True)
+        from .media import send_options
+        kwargs = send_options(handle)
+        # Telegram's native animated/sticker types require explicit attributes.
+        if handle.media_kind == 'animation':
+            from telethon.tl.types import DocumentAttributeAnimated
+            kwargs['attributes'] = [DocumentAttributeAnimated()]
+        elif handle.media_kind == 'sticker':
+            from telethon.tl.types import DocumentAttributeSticker, InputStickerSetEmpty
+            kwargs['attributes'] = [DocumentAttributeSticker(alt='', stickerset=InputStickerSetEmpty())]
+        return await self.telegram.send_file(chat, raw, caption=caption, **kwargs)
