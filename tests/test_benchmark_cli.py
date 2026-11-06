@@ -48,3 +48,10 @@ def test_benchmark_help_mentions_four_default_without_four_hard_cap():
     assert '--download-request-kib' in run.stdout
     assert '4 default' in run.stdout
     assert '4 maximum' not in run.stdout
+
+
+def test_benchmark_help_has_profiler_and_upload_kind_flags():
+    run = command('--help')
+    assert run.returncode == 0
+    assert '--profile-download' in run.stdout
+    assert '--upload-kind' in run.stdout
