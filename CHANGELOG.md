@@ -1,3 +1,10 @@
+# 0.5.1 — reusable bot integration (2026-11-07)
+
+- Added public `Client.from_telethon(existing_connected_client, options=...)` to share an existing Telethon bot/user session without logging in or disconnecting its application-owned session.
+- Added complete integration cookbook (`docs/BOT_INTEGRATION.md`) including startup/shutdown, 4-worker media transfers, progress, supported media types, error handling and session safety.
+- Added runnable admin-only example bots showing Telethon in-process reuse and separate MTProto companion clients for Pyrogram/Pyrofork and Aiogram 3.
+- No changes to IQGram's worker scheduling, media logic, transport backend, or measured transfer-speed claims. 50x real throughput remains unverified.
+
 # 0.5.0 — media types, profiling and optional WarpCrypto (2026-11-07)
 
 - Added explicit native upload modes (`document`, `auto`, `photo`, `video`, `audio`, `voice`, `video_note`, `animation`, `sticker`) while preserving document as the backwards-compatible default. Arbitrary file extensions remain supported as generic documents.
