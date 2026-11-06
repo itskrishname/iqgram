@@ -2,6 +2,10 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Any
+import os
+import time
+import asyncio
+import tempfile
 from .transfer import ProgressCallback, TransferEngine, TransferOptions, TransferResult
 from .telethon_adapter import TelethonBackend
 
@@ -67,15 +71,46 @@ class Client:
         destination: str | Path,
         *,
         progress: ProgressCallback | None = None,
+        profile: bool = False,
     ) -> TransferResult:
         message = await self._client.get_messages(chat, ids=message_id)
         if message is None or getattr(message, 'media', None) is None:
             raise ValueError('message not found or has no media')
         file = getattr(message, 'file', None)
         size = getattr(file, 'size', None)
-        if not isinstance(size, int) or size <= 0:
-            raise ValueError('unknown media size: parallel download requires a document with known size')
-        return await self._engine.download(message.media, size, destination, progress=progress)
+        if isinstance(size, int) and size > 0:
+            return await self._engine.download(message.media, size, destination, progress=progress, profile=profile)
+        # Telegram PhotoSize and some other supported media may not expose
+        # a trustworthy length; use Telethon's verified media downloader.
+        if getattr(message, 'photo', None) is None and getattr(message, 'document', None) is None:
+            raise TypeError('message contains no downloadable file media (poll, geo, etc. are not files)')
+        target = Path(destination)
+        if target.exists():
+            raise FileExistsError(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        start = time.perf_counter()
+        with tempfile.TemporaryDirectory(prefix='.iqgram-media-', dir=target.parent) as td:
+            # A temporary directory safely contains any extension selected by Telethon.
+            tmp = Path(td) / ('media' + (target.suffix or '.bin'))
+            received = await self._client.download_media(message, file=str(tmp))
+            if received is None:
+                raise ValueError('Telegram did not return downloadable media')
+            received_path = Path(received)
+            if received_path.parent.resolve() != Path(td).resolve():
+                raise ValueError('Telegram returned a path outside of the private download directory')
+            if not received_path.is_file() or received_path.stat().st_size == 0:
+                raise ValueError('Telegram returned empty or missing media')
+            elapsed = time.perf_counter() - start
+            count = received_path.stat().st_size
+            if progress is not None:
+                from .transfer import Progress
+                result = progress(Progress(count, count, elapsed, 'download'))
+                import inspect
+                if inspect.isawaitable(result):
+                    await result
+            # Atomic no-replace publication only after successful callback.
+            await asyncio.to_thread(os.link, received_path, target)
+            return TransferResult(count, elapsed, 'download', target)
 
     async def upload(
         self,
@@ -84,5 +119,32 @@ class Client:
         *,
         caption: str | None = None,
         progress: ProgressCallback | None = None,
+        media_kind: str = "document",
     ) -> TransferResult:
-        return await self._engine.upload(source, chat, caption=caption, progress=progress)
+        return await self._engine.upload(source, chat, caption=caption, progress=progress, media_kind=media_kind)
+
+    async def reuse_media(
+        self,
+        source_chat: Any,
+        message_id: int,
+        destination_chat: Any,
+        *,
+        caption: str | None = None,
+    ) -> Any:
+        """Resend permitted existing Telegram file media without VPS download/upload.
+
+        This is a server-side media reference operation, NOT a measured
+        byte-transfer speedup. Protected and non-file messages are rejected.
+        """
+        message = await self._client.get_messages(source_chat, ids=message_id)
+        if message is None or getattr(message, 'media', None) is None:
+            raise ValueError('source message has no media')
+        if getattr(message, 'noforwards', False):
+            raise PermissionError('source media is protected from forwarding/reuse')
+        # Telegram can only reuse existing photo/document file references.
+        # For other types call the underlying Telethon API explicitly.
+        media = message.media
+        if not (getattr(message, 'photo', None) is not None or
+                getattr(message, 'document', None) is not None):
+            raise TypeError('this Telegram media is not a reusable file')
+        return await self._client.send_file(destination_chat, media, caption=caption)
