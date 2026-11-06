@@ -42,6 +42,32 @@ class Client:
         self._client = _telegram
         self._backend = _backend if _backend is not None else TelethonBackend(_telegram)
         self._engine = TransferEngine(self._backend, options)
+        self._owns_client = True
+
+    @classmethod
+    def from_telethon(
+        cls,
+        telegram: Any,
+        *,
+        options: TransferOptions | None = None,
+    ) -> 'Client':
+        """Attach to an already connected Telethon client without owning its lifecycle.
+
+        The bot/application remains responsible for start/disconnect. This is
+        intended for existing Telethon bots and user clients, not Pyrogram or
+        Aiogram objects (those require their own IQGram MTProto session).
+        """
+        if (telegram is None or
+            any(not callable(getattr(telegram, method, None)) for method in
+                ('get_messages', 'iter_download', 'send_file'))):
+            raise TypeError('from_telethon requires an existing Telethon TelegramClient')
+        result = cls.__new__(cls)
+        result.bot_token = None
+        result._client = telegram
+        result._backend = TelethonBackend(telegram)
+        result._engine = TransferEngine(result._backend, options)
+        result._owns_client = False
+        return result
 
     @property
     def raw(self) -> Any:
@@ -49,6 +75,11 @@ class Client:
         return self._client
 
     async def start(self) -> 'Client':
+        if not self._owns_client:
+            connected = getattr(self._client, 'is_connected', None)
+            if callable(connected) and not connected():
+                raise RuntimeError('External Telethon client must be already connected')
+            return self
         if self.bot_token:
             await self._client.start(bot_token=self.bot_token)
         else:
@@ -56,7 +87,8 @@ class Client:
         return self
 
     async def close(self) -> None:
-        await self._client.disconnect()
+        if self._owns_client:
+            await self._client.disconnect()
 
     async def __aenter__(self) -> 'Client':
         return await self.start()
