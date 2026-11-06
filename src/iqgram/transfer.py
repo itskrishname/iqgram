@@ -12,8 +12,9 @@ import math
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Callable, Protocol
 
 CHUNK_SIZE = 512 * 1024
@@ -27,12 +28,15 @@ class TransferOptions:
     download_workers: int = 4
     upload_workers: int = 4
     download_request_size: int = CHUNK_SIZE
+    upload_pipeline_depth: int = 1
 
     def __post_init__(self) -> None:
         if type(self.download_workers) is not int or not 1 <= self.download_workers <= 32:
             raise ValueError('download_workers must be between 1 and 32')
         if type(self.upload_workers) is not int or not 1 <= self.upload_workers <= 32:
             raise ValueError('upload_workers must be between 1 and 32')
+        if type(self.upload_pipeline_depth) is not int or not 1 <= self.upload_pipeline_depth <= 4:
+            raise ValueError('upload_pipeline_depth must be between 1 and 4')
         if type(self.download_request_size) is not int or self.download_request_size not in (CHUNK_SIZE, 2 * CHUNK_SIZE):
             raise ValueError('download_request_size must be 524288 or 1048576 bytes')
 
@@ -57,10 +61,34 @@ class TransferResult:
     elapsed_seconds: float
     direction: str
     value: Any
+    profile: DownloadProfile | None = None
 
     @property
     def bytes_per_second(self) -> float:
         return self.bytes_transferred / max(self.elapsed_seconds, 1e-9)
+
+@dataclass(frozen=True)
+class WorkerProfile:
+    worker_index: int
+    transferred: int
+    chunks: int
+    read_wait_seconds: float
+    disk_write_seconds: float
+
+
+@dataclass(frozen=True)
+class DownloadProfile:
+    workers: tuple[WorkerProfile, ...]
+
+    @property
+    def total_read_wait_seconds(self) -> float:
+        # Overlapping worker wait times: not elapsed wall time.
+        return sum(w.read_wait_seconds for w in self.workers)
+
+    @property
+    def total_disk_write_seconds(self) -> float:
+        return sum(w.disk_write_seconds for w in self.workers)
+
 
 @dataclass(frozen=True)
 class UploadedHandle:
@@ -69,6 +97,7 @@ class UploadedHandle:
     name: str
     big: bool
     md5_checksum: str | None = None
+    media_kind: str = "document"
 
 class TransferBackend(Protocol):
     def iter_range(self, media: Any, offset: int, chunk_count: int, chunk_size: int) -> AsyncIterator[bytes]: ...
@@ -142,6 +171,7 @@ class TransferEngine:
         destination: str | Path,
         *,
         progress: ProgressCallback | None = None,
+        profile: bool = False,
     ) -> TransferResult:
         if not isinstance(size, int) or size <= 0:
             raise ValueError('known positive file size required for parallel download')
@@ -154,32 +184,53 @@ class TransferEngine:
         total_chunks = math.ceil(size / chunk_size)
         workers = min(self.options.download_workers, total_chunks)
         meter = _ProgressMeter(size, 'download', progress)
+        worker_profiles: list[WorkerProfile] = []
         fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
         try:
             os.ftruncate(fd, size)
 
-            async def worker(begin: int, count: int) -> None:
+            async def worker(index: int, begin: int, count: int) -> None:
                 received = 0
+                read_wait = 0.0
+                disk_wait = 0.0
+                transferred = 0
                 async with self._slots:
-                    async for data in self.backend.iter_range(media, begin * chunk_size, count, chunk_size):
-                        if received >= count:
-                            raise TransferError('backend returned extra download chunks')
-                        offset = (begin + received) * chunk_size
-                        expected = min(chunk_size, size - offset)
-                        if len(data) != expected:
-                            raise TransferError(f'bad chunk at {offset}: got {len(data)} bytes, expected {expected}')
-                        await asyncio.to_thread(_pwrite_fully, fd, data, offset)
-                        await meter.add(len(data))
-                        received += 1
+                    stream = self.backend.iter_range(media, begin * chunk_size, count, chunk_size)
+                    # Explicit anext allows observing time awaiting a media chunk.
+                    # This includes queue/iterator overhead; it is NOT raw TCP RTT.
+                    async with aclosing(aiter(stream)) as iterator:
+                        while True:
+                            before = time.perf_counter() if profile else 0.0
+                            try:
+                                data = await anext(iterator)
+                            except StopAsyncIteration:
+                                break
+                            if profile:
+                                read_wait += time.perf_counter() - before
+                            if received >= count:
+                                raise TransferError('backend returned extra download chunks')
+                            offset = (begin + received) * chunk_size
+                            expected = min(chunk_size, size - offset)
+                            if len(data) != expected:
+                                raise TransferError(f'bad chunk at {offset}: got {len(data)} bytes, expected {expected}')
+                            before = time.perf_counter() if profile else 0.0
+                            await asyncio.to_thread(_pwrite_fully, fd, data, offset)
+                            if profile:
+                                disk_wait += time.perf_counter() - before
+                            await meter.add(len(data))
+                            received += 1
+                            transferred += len(data)
                 if received != count:
                     raise TransferError(f'incomplete download range: {received}/{count} chunks')
+                if profile:
+                    worker_profiles.append(WorkerProfile(index, transferred, received, read_wait, disk_wait))
 
             try:
                 async with asyncio.TaskGroup() as tasks:
                     start = 0
                     for index in range(workers):
                         count = total_chunks // workers + (1 if index < total_chunks % workers else 0)
-                        tasks.create_task(worker(start, count))
+                        tasks.create_task(worker(index, start, count))
                         start += count
             except ExceptionGroup as group:
                 raise _first_error(group) from group
@@ -192,7 +243,10 @@ class TransferEngine:
             # Linux hard-link provides atomic no-replace semantics.
             os.link(tmp, path)
             tmp.unlink()
-            return meter.result(path)
+            result = meter.result(path)
+            if profile:
+                result = replace(result, profile=DownloadProfile(tuple(sorted(worker_profiles, key=lambda x: x.worker_index))))
+            return result
         finally:
             if fd >= 0:
                 os.close(fd)
@@ -205,10 +259,14 @@ class TransferEngine:
         *,
         caption: str | None = None,
         progress: ProgressCallback | None = None,
+        media_kind: str = "document",
     ) -> TransferResult:
         path = Path(source)
         if not path.is_file():
             raise FileNotFoundError(path)
+        # Validate native file semantics before uploading any byte.
+        from .media import send_options
+        send_options(UploadedHandle(0, 0, path.name, False, media_kind=media_kind))
         size = path.stat().st_size
         if size <= 0:
             raise ValueError('cannot upload an empty file')
@@ -223,24 +281,57 @@ class TransferEngine:
             for i in range(parts):
                 queue.put_nowait(i)
 
-            async def worker() -> None:
-                while True:
-                    try:
-                        i = queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        return
-                    try:
-                        expected = min(CHUNK_SIZE, size - i*CHUNK_SIZE)
-                        chunk = await asyncio.to_thread(os.pread, fd, expected, i*CHUNK_SIZE)
-                        if len(chunk) != expected:
-                            raise TransferError('file changed or truncated during upload')
+            async def save_index(i: int, *, with_slot: bool) -> None:
+                """Read one part and count it only after Telegram acknowledges it."""
+                try:
+                    expected = min(CHUNK_SIZE, size - i * CHUNK_SIZE)
+                    chunk = await asyncio.to_thread(os.pread, fd, expected, i * CHUNK_SIZE)
+                    if len(chunk) != expected:
+                        raise TransferError('file changed or truncated during upload')
+                    if with_slot:
                         async with self._slots:
                             acknowledged = await self.backend.save_part(file_id, i, parts, chunk, is_big)
-                        if not acknowledged:
-                            raise TransferError(f'Telegram rejected file part {i}')
-                        await meter.add(len(chunk))
-                    finally:
-                        queue.task_done()
+                    else:
+                        acknowledged = await self.backend.save_part(file_id, i, parts, chunk, is_big)
+                    if not acknowledged:
+                        raise TransferError(f'Telegram rejected file part {i}')
+                    await meter.add(len(chunk))
+                finally:
+                    queue.task_done()
+
+            async def worker() -> None:
+                depth = self.options.upload_pipeline_depth
+                if depth == 1:
+                    # Preserve the original stable path for existing users.
+                    while True:
+                        try:
+                            index = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            return
+                        await save_index(index, with_slot=True)
+                else:
+                    # One logical worker owns at most `depth` in-flight RPCs.
+                    # Acquiring the shared slot for the worker's lifetime keeps
+                    # the number of worker loops bounded, even across jobs.
+                    async with self._slots:
+                        async with asyncio.TaskGroup() as part_tasks:
+                            pending: set[asyncio.Task[None]] = set()
+                            while True:
+                                while len(pending) < depth:
+                                    try:
+                                        index = queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        break
+                                    pending.add(part_tasks.create_task(save_index(index, with_slot=False)))
+                                if not pending:
+                                    return
+                                finished, pending = await asyncio.wait(
+                                    pending, return_when=asyncio.FIRST_COMPLETED
+                                )
+                                # Propagate errors immediately. TaskGroup cancels
+                                # any outstanding requests before returning.
+                                for completed in finished:
+                                    completed.result()
 
             try:
                 async with asyncio.TaskGroup() as tasks:
@@ -252,7 +343,7 @@ class TransferEngine:
                 raise TransferError('incomplete upload')
             if path.stat().st_size != size:
                 raise TransferError('file changed during upload')
-            handle = UploadedHandle(file_id, parts, path.name, is_big, checksum)
+            handle = UploadedHandle(file_id, parts, path.name, is_big, checksum, media_kind)
             sent = await self.backend.send_uploaded(chat, handle, caption)
             return meter.result(sent)
         finally:
