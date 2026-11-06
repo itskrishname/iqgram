@@ -4,7 +4,18 @@
 
 This repository contains a custom parallel download range scheduler, concurrent upload-part scheduler, a pluggable transport adapter, and a developer API for Telegram bot **and** user sessions. **It is not currently proven faster than WZGram**, and does not claim a 50x speedup. It uses **Telethon 1.45+ as the underlying authentication / MTProto RPC transport** while IQGram controls its file-part scheduling. It does **not** depend on WZGram.
 
-> **Project status: experimental alpha 0.5.0.** Local unit tests pass; Telegram production integration and real-world 50x benchmarks have not been completed here. Do not ship high-value production data without independent Telegram testing.
+> **Project status: experimental alpha 0.5.1.** Local unit tests pass; Telegram production integration and real-world 50x benchmarks have not been completed here. Do not ship high-value production data without independent Telegram testing.
+
+
+## v0.5.1 — Integrate IQGram into ANY existing async Telegram bot
+
+Start with **[docs/BOT_INTEGRATION.md](docs/BOT_INTEGRATION.md)** for copy-paste installation, startup/shutdown and error handling. Run IQGram as a library; you do **not** need to replace your existing bot's handlers, plugins, database, menus or commands.
+
+- **Existing Telethon bot:** call `Client.from_telethon(existing_connected_bot)`, share its MTProto connection and leave lifecycle ownership with the application. Example: [`examples/integrate_existing_telethon_bot.py`](examples/integrate_existing_telethon_bot.py).
+- **Pyrogram / Pyrofork / Aiogram / another framework:** start one separate `Client('iqgram_companion', api_id, api_hash, bot_token=...)` at bot startup; close it once at shutdown. These frameworks cannot directly share their existing client object with IQGram. Examples: [`examples/integrate_pyrogram_companion.py`](examples/integrate_pyrogram_companion.py) and [`examples/integrate_aiogram_companion.py`](examples/integrate_aiogram_companion.py).
+- **No framework lock-in:** from an async handler, `await iq.download(chat, message_id, path)` or `await iq.upload(path, chat, media_kind='document')`. Default workers remain 4.
+
+Use only chats/messages accessible to IQGram's Telegram session. Do not share `.session` files between libraries. This release improves integration ergonomics, **not measured transfer speed**.
 
 
 ## v0.5.0 — File media, performance profiling and optional WarpCrypto
