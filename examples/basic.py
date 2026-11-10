@@ -9,7 +9,7 @@ async def main():
         api_id=int(os.environ['IQGRAM_API_ID']),
         api_hash=os.environ['IQGRAM_API_HASH'],
         bot_token=os.getenv('IQGRAM_BOT_TOKEN'),  # omit for user sessions
-        options=TransferOptions(download_workers=4, upload_workers=4),
+        options=TransferOptions(download_workers=8, upload_workers=8),
     ) as client:
         # Provide an authorized message ID and chat.
         result = await client.download('me', 123, './document.bin')
