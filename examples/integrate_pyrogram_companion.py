@@ -25,10 +25,13 @@ async def main() -> None:
     source_message = int(os.environ['IQGRAM_SOURCE_MESSAGE_ID'])
 
     # Separate session filenames; do NOT point two libraries at the same .session.
-    pyrogram_bot = PyrogramClient('example_pyrogram', api_id, api_hash, bot_token=token)
+    pyrogram_bot = PyrogramClient(
+        'example_pyrogram', api_id, api_hash, bot_token=token,
+        workers=8, max_concurrent_transmissions=16,
+    )
     iq = IQClient(
         'example_iqgram_companion', api_id, api_hash,
-        bot_token=token, options=TransferOptions(download_workers=4, upload_workers=4),
+        bot_token=token, options=TransferOptions(download_workers=8, upload_workers=8),
     )
 
     @pyrogram_bot.on_message(filters.command('iqtest') & filters.private)
