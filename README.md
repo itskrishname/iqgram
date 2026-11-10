@@ -152,6 +152,35 @@ python examples/benchmark.py --chat me --message 123 --upload-chat me
 
 Only use media you are authorized to access. The code checks chunk lengths, avoids silently overwriting downloaded files and cleans incomplete download files on errors/cancellation.
 
+## Opt-in 8/16 configuration (Pyrogram companion)
+
+The included `examples/integrate_pyrogram_companion.py` uses these explicit
+settings for the requested faster/concurrent-operation trial:
+
+```python
+pyrogram_bot = PyrogramClient(
+    'example_pyrogram', api_id, api_hash, bot_token=token,
+    workers=8, max_concurrent_transmissions=16,
+)
+iq = IQClient(
+    'example_iqgram_companion', api_id, api_hash,
+    bot_token=token, options=TransferOptions(download_workers=8, upload_workers=8),
+)
+```
+
+`workers=8` configures Pyrogram handler workers;
+`max_concurrent_transmissions=16` limits **Pyrogram's own** simultaneous file
+transfers. These **do not** configure IQGram's Telethon transfer engine.
+IQGram has its own `download_workers=8` / `upload_workers=8` for this example.
+The standalone `examples/basic.py` also opts into 8 IQGram transfer workers.
+
+**Library defaults remain four** for backwards compatibility and to preserve
+prior measured benchmarks. The number 16 is *not* an IQGram upload RPC
+pipeline depth or a promised speed multiplier. Higher concurrency may increase
+memory usage, API rate limits, and contention; benchmark on your own VPS.
+For the benchmark CLI, opt in with
+`--download-workers 8 --upload-workers 8`.
+
 ## Settings
 
 ```python
